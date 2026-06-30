@@ -20,13 +20,15 @@ from isaaclab_assets import ISAACLAB_ASSETS_DATA_DIR
 
 from .camera_config import CameraConfig
 
-# Default camera configuration (ZedX Camera for b2w and aow d)
+# Default camera configuration (updated to GO2W-style narrow stereo)
 DEFAULT_CAMERA_CONFIG = CameraConfig(
-    focal_length=25.0,
-    baseline=0.12,
-    min_depth=0.25,
-    max_depth=10.0,
-    depth_encoder_path=os.path.join(str(ISAACLAB_ASSETS_DATA_DIR), "Policies", "RSL-ETHZ/AoW_d/depth_encoder", "vae_pretrain_fuse.pth")
+    focal_length=28.0,
+    baseline=0.05,
+    min_depth=0.3,
+    max_depth=5.0,
+    depth_encoder_path=os.path.join(str(ISAACLAB_ASSETS_DATA_DIR), "Policies", "RSL-ETHZ/AoW_d/depth_encoder", "vae_pretrain_fuse.pth"),
+    valid_ratio_threshold=0.10,
+    shuffle=True,
 )
     
 class VAESampler(nn.Module):

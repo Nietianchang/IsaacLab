@@ -44,6 +44,10 @@ class CameraConfig:
     focal_length: float = 25.0
     baseline: float = 0.12
 
+    # Additional validation / preprocessing parameters
+    valid_ratio_threshold: float = 0.0
+    shuffle: bool = False
+
     # Depth range parameters
     min_depth: float = 0.25
     max_depth: float = 10.0
@@ -79,7 +83,17 @@ DEFAULT_CAMERA_CONFIG = ZEDX_CAMERA_CONFIG
 ROBOT_CAMERA_CONFIGS = {
     "b2w": ZEDX_CAMERA_CONFIG,
     "aow_d": ZEDX_CAMERA_CONFIG,
-    "go2w": ZEDX_CAMERA_CONFIG,
+    # GO2W uses a different stereo configuration (narrower range, different focal/baseline)
+    "go2w": CameraConfig(
+        focal_length=28.0,
+        baseline=0.05,
+        min_depth=0.3,
+        max_depth=5.0,
+        resolution=(64, 40),
+        depth_encoder_path=_get_encoder_path("vae_pretrain_new.pth"),
+        valid_ratio_threshold=0.10,
+        shuffle=True,
+    ),
 }
 """Dictionary mapping robot names to their camera configurations."""
 
