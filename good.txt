@@ -1,0 +1,26 @@
+RecurrentGen] epoch=4 mb=2 env_range=[500,750) traj_count=270 obs_slots_total=4320 obs_slots_valid=4000 obs_slots_padding=320 padding_ratio=0.0741 obs_batch_bytes=44513280 critic_obs_batch_bytes=98720640 core_batch_bytes=146682080 core_batch_mb=139.887
+[GPU Mem Before Backward] allocated=5.064GB
+[GPU Mem After Backward] allocated=2.500GB | delta=-2.564GB
+Batch length:  16
+Batch length1:  250
+[RecurrentGen] epoch=4 mb=3 env_range=[750,1000) traj_count=264 obs_slots_total=4224 obs_slots_valid=4000 obs_slots_padding=224 padding_ratio=0.0530 obs_batch_bytes=43524096 critic_obs_batch_bytes=96526848 core_batch_bytes=143449856 core_batch_mb=136.804
+[GPU Mem Before Backward] allocated=5.011GB
+[GPU Mem After Backward] allocated=2.500GB | delta=-2.510GB
+Batch length:  16
+Batch length1:  250
+[UpdateData] iter=1 envs=1000 steps_per_env=16 rollout_samples=16000 dones_in_rollout=69 epochs=5 mini_batches=4 batches_seen=20 total_samples_actual=80000 total_samples_expected=80000 samples_per_batch_avg=4000 samples_per_batch_min=4000 samples_per_batch_max=4000
+[GPU Mem] iter=1 | allocated=1.790GB | reserved=7.885GB | total=31.357GB | leak_delta=+0.0319GB
+这是B2W，
+RecurrentGen] epoch=4 mb=30 env_range=[930,961) traj_count=457 obs_slots_total=7312 obs_slots_valid=496 obs_slots_padding=6816 padding_ratio=0.9322 obs_batch_bytes=75342848 critic_obs_batch_bytes=167093824 core_batch_bytes=246340496 core_batch_mb=234.929
+[GPU Mem Before Backward] allocated=14.018GB
+[GPU Mem After Backward] allocated=9.765GB | delta=-4.253GB
+Batch length:  16
+Batch length1:  31
+[RecurrentGen] epoch=4 mb=31 env_range=[961,992) traj_count=450 obs_slots_total=7200 obs_slots_valid=496 obs_slots_padding=6704 padding_ratio=0.9311 obs_batch_bytes=74188800 critic_obs_batch_bytes=164534400 core_batch_bytes=242569568 core_batch_mb=231.332
+[GPU Mem Before Backward] allocated=13.954GB
+[GPU Mem After Backward] allocated=9.765GB | delta=-4.189GB
+Batch length:  16
+Batch length1:  31
+[UpdateData] iter=1 envs=1000 steps_per_env=16 rollout_samples=16000 dones_in_rollout=14488 epochs=5 mini_batches=32 batches_seen=160 total_samples_actual=79360 total_samples_expected=80000 samples_per_batch_avg=496 samples_per_batch_min=496 samples_per_batch_max=496
+[GPU Mem] iter=1 | allocated=1.780GB | reserved=15.111GB | total=31.357GB | leak_delta=+0.0299GB
+这是go2w
