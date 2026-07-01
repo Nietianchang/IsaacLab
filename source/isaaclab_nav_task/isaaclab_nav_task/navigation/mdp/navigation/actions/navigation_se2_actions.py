@@ -282,6 +282,7 @@ class PerceptiveNavigationSE2Action(ActionTerm):
 
         return filtered_commands
 
+
     def process_actions(self, actions):
         """Process low-level navigation actions. This function is called with a frequency of 10Hz.
 
