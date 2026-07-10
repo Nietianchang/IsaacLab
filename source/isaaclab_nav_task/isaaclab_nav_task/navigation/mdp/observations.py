@@ -219,14 +219,9 @@ def base_lin_vel_delayed(
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     lin_vel = asset.data.root_lin_vel_b
-    try:
-        action_term = env.action_manager.get_term("velocity_command")
-        last_vel = getattr(action_term, "_last_estimated_vel", None)
-        if last_vel is not None:
-            print(f"[DEBUG] last_estimated_vel: {last_vel.tolist()[0]}")
-            return last_vel
-    except Exception:
-        pass
+    # Use the true body-frame linear velocity (with the same delay + observation noise pipeline as
+    # b2w) instead of the low-level policy's estimated velocity, so the high-level odometry input is
+    # consistent with the b2w setup.
     return env.delay_manager.compute_delayed_lin_vel(lin_vel)
 
 
@@ -354,6 +349,8 @@ def velocity_commands_scaled(
     action_name: str,
     scale: tuple[float, float, float] = (2.0, 2.0, 0.25),
     yaw_extra_scale: float = 1.5,
+    noise_min: tuple[float, float, float] | None = None,
+    noise_max: tuple[float, float, float] | None = None,
     debug: bool = True,
 ) -> torch.Tensor:
     """Velocity command obs aligned with the GO2W deployment preprocessing.
@@ -371,12 +368,22 @@ def velocity_commands_scaled(
         action_name: The name of the (high-level) velocity command action term.
         scale: Per-axis command scale [vx, vy, omega] applied first.
         yaw_extra_scale: Additional multiplier applied to the yaw (omega) channel.
+        noise_min: Optional per-axis lower bound of uniform noise added to the ORIGINAL
+            (unscaled) command before scaling. b2w-style: noise on the raw velocity command,
+            then scaled together with it.
+        noise_max: Optional per-axis upper bound of the uniform noise (see ``noise_min``).
         debug: Whether to print the scaled command.
 
     Returns:
         The scaled velocity command, shape [num_envs, 3].
     """
     cmd = env.action_manager.get_term(action_name).processed_actions
+    # Add uniform noise on the ORIGINAL (unscaled) command -- b2w-style -- BEFORE scaling, so the
+    # noise gets scaled together with the command (rather than added to the already-scaled obs).
+    if noise_min is not None and noise_max is not None:
+        nmin = torch.tensor(noise_min, dtype=cmd.dtype, device=cmd.device)
+        nmax = torch.tensor(noise_max, dtype=cmd.dtype, device=cmd.device)
+        cmd = cmd + (torch.rand_like(cmd) * (nmax - nmin) + nmin)
     scale_t = torch.tensor(scale, dtype=cmd.dtype, device=cmd.device)
     scaled = cmd * scale_t
     scaled[:, 2] = scaled[:, 2] * yaw_extra_scale

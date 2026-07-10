@@ -13,6 +13,7 @@ import math
 import os
 from dataclasses import MISSING
 
+import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -175,7 +176,7 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel_delayed, noise=Unoise(n_min=-0.2, n_max=0.2)
+            func=mdp.base_lin_vel_delayed, noise=Unoise(n_min=-0.1, n_max=0.1)
         )
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel_delayed, noise=Unoise(n_min=-0.1, n_max=0.1)
@@ -225,7 +226,17 @@ class ObservationsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.1, n_max=0.1))
-        velocity_commands = ObsTerm(func=mdp.generated_actions, params={"action_name": "velocity_command"})
+        # Corrupt the velocity command fed to the low-level policy so the high-level learns to be
+        # robust to command tracking error. Per-dimension noise: linear (vx, vy) +/-0.15, angular
+        # (wz) +/-0.25 -- slightly larger than the b2w low-level training obs noise.
+        velocity_commands = ObsTerm(
+            func=mdp.generated_actions,
+            params={"action_name": "velocity_command"},
+            noise=Unoise(
+                n_min=torch.tensor([-0.15, -0.15, -0.25]),
+                n_max=torch.tensor([0.15, 0.15, 0.25]),
+            ),
+        )
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.2, n_max=0.2))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
         actions = ObsTerm(func=mdp.last_low_level_action, params={"action_term": "velocity_command"})
@@ -350,6 +361,13 @@ class RewardsCfg:
     rot_movement = RewTerm(func=mdp.rot_movement, weight=-1e-5)
     action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.1)
     episode_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
+
+    # Base collision penalty: penalize contact forces on the robot's base body.
+    base_contact = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
+    )
 
     # Goal rewards
     reach_goal_xy_soft = RewTerm(

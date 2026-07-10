@@ -213,7 +213,12 @@ class GO2WNavigationEnvCfg(NavigationEnvCfg):
             "action_name": "velocity_command",
             "scale": (2.0, 2.0, 0.25),
             "yaw_extra_scale": 1.0,
+            # b2w-style command noise added to the ORIGINAL (unscaled) command before scaling,
+            # slightly larger than b2w. Handled inside the func, so disable the ObsTerm-level noise.
+            "noise_min": (-0.15, -0.15, -0.25),
+            "noise_max": (0.15, 0.15, 0.25),
         }
+        self.observations.low_level_policy.velocity_commands.noise = None
         # self.observations.low_level_policy.actions.params = {"action_term": "velocity_command"}
         self.scene.terrain.max_init_terrain_level = 10
         self.scene.terrain.terrain_generator.difficulty_range = [0.5, 1.0]
