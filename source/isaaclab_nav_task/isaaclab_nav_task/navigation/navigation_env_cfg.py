@@ -176,7 +176,7 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel_delayed, noise=Unoise(n_min=-0.1, n_max=0.1)
+            func=mdp.base_lin_vel_delayed, noise=Unoise(n_min=-0.2, n_max=0.2)
         )
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel_delayed, noise=Unoise(n_min=-0.1, n_max=0.1)
@@ -362,12 +362,12 @@ class RewardsCfg:
     action_rate_l1 = RewTerm(func=mdp.action_rate_l1, weight=-0.1)
     episode_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
 
-    # Base collision penalty: penalize contact forces on the robot's base body.
-    base_contact = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
-    )
+    # # Base collision penalty: penalize contact forces on the robot's base body.
+    # base_contact = RewTerm(
+    #     func=mdp.undesired_contacts,
+    #     weight=-1.0,
+    #     params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
+    # )
 
     # Goal rewards
     reach_goal_xy_soft = RewTerm(

@@ -6,6 +6,6 @@ conda activate daohang3102
 ./isaaclab.sh -p source/isaaclab_nav_task/scripts/play.py --task Isaac-Nav-PPO-B2W-Play-v0 --checkpoint model_2500.pt --num_envs 16
  ./isaaclab.sh -p source/isaaclab_nav_task/scripts/train.py --task Isaac-Nav-PPO-GO2W-v0 --num_envs 3000 --headless
 
- ./isaaclab.sh -p source/isaaclab_nav_task/scripts/play.py   --task Isaac-Nav-PPO-GO2W-Play-v0 --checkpoint xiangjigai/model_1500.pt --num_envs 1
+ ./isaaclab.sh -p source/isaaclab_nav_task/scripts/play.py   --task Isaac-Nav-PPO-GO2W-Play-v0 --checkpoint model_1500.pt --num_envs 1
 
 
