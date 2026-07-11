@@ -372,12 +372,12 @@ class RewardsCfg:
     # Goal rewards
     reach_goal_xy_soft = RewTerm(
         func=mdp.reach_goal_xyz,
-        weight=0.25,
+        weight=0.4,
         params={"command_name": "robot_goal", "sigmoid": 2.5, "T_r": 1.0, "probability": 0.01, "flat": False, "ratio": False},
     )
     reach_goal_xy_tight = RewTerm(
         func=mdp.reach_goal_xyz,
-        weight=1.5,
+        weight=2.5,
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
     )
 
