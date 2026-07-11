@@ -193,6 +193,21 @@ class StairConfig:
     # Height of each step in meters
     STEP_HEIGHT_METERS: float = 0.2
 
+    # --- Randomized staircase parameters -------------------------------------
+    # Each step's height is sampled uniformly in [STEP_HEIGHT_MIN, STEP_HEIGHT_MAX] (meters).
+    STEP_HEIGHT_MIN_METERS: float = 0.12
+    STEP_HEIGHT_MAX_METERS: float = 0.18
+
+    # Number of steps is sampled uniformly in [NUM_STEPS_MIN, NUM_STEPS_MAX] (inclusive).
+    # Total staircase height = sum of per-step heights, so with the ranges above the total
+    # lands roughly in [~1 m, ~3 m] (may slightly exceed at the extremes).
+    NUM_STEPS_MIN: int = 7
+    NUM_STEPS_MAX: int = 18
+
+    # Horizontal depth (run) of a single step in meters. Kept fixed so taller staircases
+    # simply become longer (more realistic / walkable) instead of steeper.
+    STEP_DEPTH_METERS: float = 0.4
+
     # Grid size for 3x3 stair structures
     STAIR_GRID_SIZE: int = 3
 

@@ -269,6 +269,7 @@ class PerceptiveNavigationSE2Action(ActionTerm):
 
         # Use per-environment per-dimension alpha values for filtering
         # Shape: [num_envs, action_dim] - already matches velocity_commands shape
+        print("filtering velocity commands with low-pass filter")
         alpha_values = self._per_env_per_dim_low_pass_alpha
 
         # Apply exponential smoothing (low-pass filter) with per-environment per-dimension alpha

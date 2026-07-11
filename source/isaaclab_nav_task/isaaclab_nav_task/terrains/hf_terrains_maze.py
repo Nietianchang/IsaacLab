@@ -350,68 +350,63 @@ def make_random_obstacle(
 # =============================================================================
 
 class StairGenerator:
-    """Generates stair structures with platforms."""
+    """Generates a straight staircase that rises to a top platform.
 
-    LAYOUTS = [
-        {"platforms": [(1, 0), (1, 1), (1, 2), (0, 1), (2, 1)],
-         "stairs": [(0, 0, "n"), (2, 2, "s"), (0, 2, "s"), (2, 0, "w")]},
-        {"platforms": [(0, 1), (1, 1), (2, 1)],
-         "stairs": [(0, 0, "n"), (2, 2, "s"), (0, 2, "s"), (2, 0, "n")]},
-        {"platforms": [(0, 1), (1, 1), (2, 1), (1, 0), (1, 2)],
-         "stairs": [(0, 0, "n"), (2, 2, "s"), (0, 2, "s"), (2, 0, "n")]},
-    ]
+    Both the number of steps and each step's height are randomized (see StairConfig), so the
+    total height varies (~1-3 m) while the horizontal run per step stays fixed. This means a
+    taller staircase is simply longer rather than steeper.
+    """
 
-    def __init__(self, wall_height: float, vertical_scale: float):
+    def __init__(self, wall_height: float, vertical_scale: float, horizontal_scale: float):
         self.wall_height = wall_height
-        self.platform_height = int(wall_height - 0.5 / vertical_scale)
         self.vertical_scale = vertical_scale
-        self._make_stair_templates()
-
-    def _make_stair_templates(self):
-        """Create stair templates for each direction."""
-        cell_px = STAIRS.SINGLE_CELL_PIXELS
-        step_res = cell_px // STAIRS.NUM_STEPS
-
-        east = np.zeros((cell_px, cell_px), dtype=np.float32)
-        for i in range(STAIRS.NUM_STEPS):
-            h = STAIRS.STEP_HEIGHT_METERS * (i + 1) / self.vertical_scale
-            east[i * step_res:(i + 1) * step_res, :] = h
-
-        self.templates = {
-            "e": east,
-            "n": rotate(east, 90),
-            "w": rotate(east, 180),
-            "s": rotate(east, 270),
-        }
+        self.horizontal_scale = horizontal_scale
+        # Horizontal run of a single step, in pixels (kept fixed).
+        self.step_depth_px = max(1, int(round(STAIRS.STEP_DEPTH_METERS / horizontal_scale)))
+        # Walkway width / top-platform depth, in pixels (one cell).
+        self.width_px = STAIRS.SINGLE_CELL_PIXELS
+        self.platform_px = STAIRS.SINGLE_CELL_PIXELS
 
     def generate(self, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Generate a 3x3 stair/platform structure.
+        """Generate a straight staircase + top platform.
 
         Args:
             rng: Random number generator.
 
         Returns:
-            Tuple of (heights, valid_mask, platform_mask).
+            Tuple of (heights, valid_mask, platform_mask). Arrays are 2D with a size that
+            depends on the sampled number of steps and a random 0/90/180/270 orientation.
         """
-        layout = self.LAYOUTS[rng.integers(len(self.LAYOUTS))]
-        size = STAIRS.STAIR_GRID_SIZE * STAIRS.SINGLE_CELL_PIXELS
-        cell_px = STAIRS.SINGLE_CELL_PIXELS
+        # Sample number of steps and per-step heights (meters).
+        num_steps = int(rng.integers(STAIRS.NUM_STEPS_MIN, STAIRS.NUM_STEPS_MAX + 1))
+        step_heights_m = rng.uniform(
+            STAIRS.STEP_HEIGHT_MIN_METERS, STAIRS.STEP_HEIGHT_MAX_METERS, size=num_steps
+        )
+        # Cumulative top height of each step, in discretized (vertical-scale) units.
+        cumulative_units = np.round(np.cumsum(step_heights_m) / self.vertical_scale).astype(np.int16)
+        total_top = int(cumulative_units[-1])
 
-        heights = np.zeros((size, size), dtype=np.float32)
-        valid_mask = np.zeros((size, size), dtype=bool)
-        platform_mask = np.zeros((size, size), dtype=bool)
+        length_px = num_steps * self.step_depth_px + self.platform_px
+        heights = np.zeros((length_px, self.width_px), dtype=np.int16)
+        valid_mask = np.ones((length_px, self.width_px), dtype=bool)
+        platform_mask = np.zeros((length_px, self.width_px), dtype=bool)
 
-        for gx, gy in layout["platforms"]:
-            xs, xe = gx * cell_px, (gx + 1) * cell_px
-            ys, ye = gy * cell_px, (gy + 1) * cell_px
-            heights[xs:xe, ys:ye] = self.platform_height
-            valid_mask[xs:xe, ys:ye] = True
-            platform_mask[xs:xe, ys:ye] = True
+        # Build the ascending steps along the length (axis 0).
+        for i in range(num_steps):
+            xs = i * self.step_depth_px
+            xe = xs + self.step_depth_px
+            heights[xs:xe, :] = cumulative_units[i]
 
-        for gx, gy, direction in layout["stairs"]:
-            xs, xe = gx * cell_px, (gx + 1) * cell_px
-            ys, ye = gy * cell_px, (gy + 1) * cell_px
-            heights[xs:xe, ys:ye] = self.templates[direction]
+        # Top platform at the full height.
+        heights[num_steps * self.step_depth_px:, :] = total_top
+        platform_mask[num_steps * self.step_depth_px:, :] = True
+
+        # Random orientation (0/90/180/270). np.rot90 keeps integer heights exact.
+        k = int(rng.integers(0, 4))
+        if k:
+            heights = np.rot90(heights, k).copy()
+            valid_mask = np.rot90(valid_mask, k).copy()
+            platform_mask = np.rot90(platform_mask, k).copy()
 
         return heights, valid_mask, platform_mask
 
@@ -448,7 +443,7 @@ def maze_terrain(difficulty: float, cfg: "hf_terrains_maze_cfg.HfMazeTerrainCfg"
     terrain_h = int(cfg.size[1] / cfg.horizontal_scale)
 
     terrain = TerrainData.create(terrain_w, terrain_h)
-    stair_gen = StairGenerator(wall_height, cfg.vertical_scale)
+    stair_gen = StairGenerator(wall_height, cfg.vertical_scale, cfg.horizontal_scale)
 
     # Generate base pattern
     if cfg.non_maze_terrain:
@@ -547,7 +542,6 @@ def _add_stairs(
     excluded = set(range(grid_middle - 1, grid_middle + 1))
 
     # Compute stair placement locations (avoid center and edges)
-    # Stairs are 3x3, so max position is grid_size - 4 to fit with margin
     stair_margin = 1
     max_x = grid_w - STAIRS.STAIR_GRID_SIZE - stair_margin
     max_y = grid_h - STAIRS.STAIR_GRID_SIZE - stair_margin
@@ -556,32 +550,44 @@ def _add_stairs(
     y_locs = set(np.round(np.linspace(stair_margin, max_y, num_locations)).astype(int)) - excluded
 
     processed = set()
-    stair_size = STAIRS.STAIR_GRID_SIZE * STAIRS.SINGLE_CELL_PIXELS
     stair_prob = difficulty * OBSTACLES.STAIRS_PLACEMENT_PROB
     obstacle_prob = difficulty * OBSTACLES.STAIRS_OBSTACLE_DENSITY
+
+    terrain_w = terrain.heights.shape[0]
+    terrain_h = terrain.heights.shape[1]
 
     for x in range(grid_w):
         for y in range(grid_h):
             if (x, y) in processed:
                 continue
 
-            # Try placing stair structure at valid locations
+            # Try placing a (variable-size) staircase at valid locations
             if x in x_locs and y in y_locs and rng.random() < stair_prob:
                 heights, valid, platform = stair_gen.generate(rng)
+                struct_w, struct_h = heights.shape  # pixels along x, y
 
                 xs = x * cell_pixels
-                xe = min(terrain.heights.shape[0], xs + stair_size)
                 ys = y * cell_pixels
-                ye = min(terrain.heights.shape[1], ys + stair_size)
+                xe = xs + struct_w
+                ye = ys + struct_h
 
-                sx, sy = xe - xs, ye - ys
-                terrain.heights[xs:xe, ys:ye] = heights[:sx, :sy]
-                terrain.valid_mask[xs:xe, ys:ye] = valid[:sx, :sy]
-                terrain.platform_mask[xs:xe, ys:ye] = platform[:sx, :sy]
+                # Skip if the structure does not fit inside the terrain bounds.
+                if xe > terrain_w or ye > terrain_h:
+                    continue
 
-                # Mark 3x3 area as processed
-                for dx in range(3):
-                    for dy in range(3):
+                # Only place on currently clear ground (avoid overlapping walls/obstacles).
+                if not terrain.valid_mask[xs:xe, ys:ye].all():
+                    continue
+
+                terrain.heights[xs:xe, ys:ye] = heights
+                terrain.valid_mask[xs:xe, ys:ye] = valid
+                terrain.platform_mask[xs:xe, ys:ye] = platform
+
+                # Mark the occupied grid cells as processed.
+                cells_x = (struct_w + cell_pixels - 1) // cell_pixels
+                cells_y = (struct_h + cell_pixels - 1) // cell_pixels
+                for dx in range(cells_x):
+                    for dy in range(cells_y):
                         processed.add((x + dx, y + dy))
 
             elif rng.random() < obstacle_prob:
