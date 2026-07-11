@@ -381,8 +381,8 @@ class RewardsCfg:
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
     )
 
-    # Backward movement penalty (disabled by default, can be enabled via curriculum)
-    backward_movement_penalty = RewTerm(func=mdp.backward_movement_penalty, weight=-0.0)
+    # Backward movement penalty: keep enabled so the robot prefers to drive forward.
+    # backward_movement_penalty = RewTerm(func=mdp.backward_movement_penalty, weight=-0.5)
 
 
 @configclass
@@ -408,10 +408,9 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    disable_backward_penalty = CurrTerm(
-        func=mdp.disable_backward_penalty_after_steps,
-        params={"disable_after_steps": 500, "action_term": "velocity_command"},
-    )
+    # NOTE: The backward-penalty-disabling curriculum was removed so the penalty stays
+    # active for the whole training and the robot keeps driving forward.
+    pass
 
 ##
 # Environment configuration

@@ -86,9 +86,31 @@ def illegal_contact_navigation(
     net_contact_forces = contact_sensor.data.net_forces_w_history
     goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
 
+    # --- DEBUG: print per-body contact force magnitudes for env 0 ---------------------
+    # Remove this block once contact reporting is confirmed to work.
+    if not hasattr(env, "_contact_debug_counter"):
+        env._contact_debug_counter = 0
+    env._contact_debug_counter += 1
+    if env._contact_debug_counter % 20 == 0:  # print every 20 steps to avoid spamming
+        body_names = contact_sensor.body_names
+        # max over history, magnitude per body, for env 0
+        per_body_force = torch.max(torch.norm(net_contact_forces[:, :, :], dim=-1), dim=1)[0]  # (num_envs, num_bodies)
+        forces_env0 = per_body_force[0]
+        print("[contact-debug] step", env._contact_debug_counter)
+        for name, f in zip(body_names, forces_env0.tolist()):
+            print(f"    {name:>20s}: {f:8.2f} N")
+    # --------------------------------------------------------------------------------
+
     termination = torch.any(
         torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold, dim=1
     )
+
+    # --- DEBUG: show which bodies are actually monitored + termination result --------
+    if env._contact_debug_counter % 20 == 0:
+        monitored_names = [contact_sensor.body_names[i] for i in sensor_cfg.body_ids]
+        print(f"[contact-debug] monitored body_ids={list(sensor_cfg.body_ids)} names={monitored_names} "
+              f"threshold={threshold} -> terminate(env0)={bool(termination[0])}")
+    # --------------------------------------------------------------------------------
 
     env_ids = torch.where(termination)[0]
 
