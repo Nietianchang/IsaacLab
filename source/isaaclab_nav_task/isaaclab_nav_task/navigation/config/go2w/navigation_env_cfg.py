@@ -99,8 +99,14 @@ class GO2WNavigationEnvCfg(NavigationEnvCfg):
         self.scene.robot = GO2W_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
         self.scene.raycast_camera.prim_path = "{ENV_REGEX_NS}/Robot/base"
-        self.scene.raycast_camera.offset.pos = (0.27, 0.0, 0.03)
-        self.scene.raycast_camera.offset.rot = (0.9990482215818578, 0.0, -0.043619387365336, 0.0)
+        # Mount the depth camera at the front-upper of the head, angled slightly downward.
+        # Reference (go2w.urdf, base frame): Head_upper_joint origin xyz=(0.285, 0, 0.01),
+        # base collision box 0.3762x0.0935x0.114 (front face ~x=0.188, top ~z=0.057). We place
+        # the camera just ahead of / above the head. rot is a +15deg pitch-DOWN about y (same
+        # positive-y convention b2w uses to look at the terrain), so it can see near-ground pits
+        # and low terrain in front of the robot.
+        self.scene.raycast_camera.offset.pos = (0.30, 0.0, 0.12)
+        self.scene.raycast_camera.offset.rot = (0.9914449, 0.0, 0.1305262, 0.0)  # ~15 deg pitch down
         self.scene.height_scanner_critic.prim_path = "{ENV_REGEX_NS}/Robot/base"
 
         # Collision handling: end the episode directly on body/leg contact (base, hip, thigh).
@@ -254,6 +260,14 @@ class GO2WNavigationEnvCfg_PLAY(GO2WNavigationEnvCfg):
         self.scene.terrain.max_init_terrain_level = None
 
         self.observations.policy.enable_corruption = False
+
+        # [DEBUG VIZ] Enable live depth-image visualization so we can confirm the camera
+        # orientation. Only triggers when running with --num_envs 1 (and non-JIT depth encoder,
+        # which go2w already uses). Remove once the camera pose is verified.
+        self.observations.policy.depth_image.params = {
+            "sensor_cfg": SceneEntityCfg("raycast_camera"),
+            "visualize": True,
+        }
         self.events.base_external_force_torque = None
         self.events.push_robot = None
 
