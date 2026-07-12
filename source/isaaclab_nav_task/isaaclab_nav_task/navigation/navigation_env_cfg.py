@@ -377,7 +377,7 @@ class RewardsCfg:
     )
     reach_goal_xy_tight = RewTerm(
         func=mdp.reach_goal_xyz,
-        weight=2,
+        weight=2.5,
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
     )
 
@@ -396,11 +396,14 @@ class TerminationsCfg:
     )
     large_pitch_angle = DoneTerm(func=mdp.large_angle_termination_navigation, params={"threshold": 40})
     early_termination = DoneTerm(func=mdp.at_goal_navigation, time_out=True, params={"distance_threshold": 0.5})
-    # Terrain fall termination (robot fell off terrain or into deep pit)
+    # Terrain fall termination (robot fell off terrain or into deep pit).
+    # time_out=False so falling into a pit is treated as a FAILURE (incurs the
+    # episode_termination -50 penalty), teaching the robot to avoid/brake at pits.
+    # The threshold is now RELATIVE to the spawn ground (see mdp.terrain_fall).
     terrain_fall = DoneTerm(
         func=mdp.terrain_fall,
-        time_out=True,
-        params={"fall_height_threshold": -2.0},
+        time_out=False,
+        params={"fall_height_threshold": -0.8},
     )
 
 

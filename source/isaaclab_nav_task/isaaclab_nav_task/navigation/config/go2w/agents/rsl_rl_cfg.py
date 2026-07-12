@@ -20,7 +20,7 @@ class GO2WNavMDPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     num_steps_per_env = 16
     max_iterations = 15000
-    save_interval = 500
+    save_interval = 100
     logger = "wandb"
     seed = 60
     wandb_project = "isaaclab_nav_go2w"
@@ -76,7 +76,7 @@ class GO2WNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     num_steps_per_env = 16
     max_iterations = 15000
-    save_interval = 500
+    save_interval = 200
     logger = "wandb"
     seed = 60
     wandb_project = "isaaclab_nav_go2w"

@@ -103,21 +103,13 @@ class GO2WNavigationEnvCfg(NavigationEnvCfg):
         self.scene.raycast_camera.offset.rot = (0.9990482215818578, 0.0, -0.043619387365336, 0.0)
         self.scene.height_scanner_critic.prim_path = "{ENV_REGEX_NS}/Robot/base"
 
-        # Disable the collision-based episode termination: instead of ending the episode on
-        # body contact, we penalize it in the reward (see base_contact reward below).
-        self.terminations.base_contact = None
-
-        # Penalize body/leg collisions (base, hip, thigh) via a negative reward instead of
-        # terminating. Wheels (.*foot) and calves are excluded since they carry the robot's
-        # weight / touch the ground during normal locomotion.
-        self.rewards.base_contact = RewTerm(
-            func=mdp.undesired_contacts,
-            weight=-1.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base", ".*hip", ".*thigh"]),
-                "threshold": 1.0,
-            },
-        )
+        # Collision handling: end the episode directly on body/leg contact (base, hip, thigh).
+        # Wheels (.*foot) and calves are excluded since they carry the robot's weight / touch
+        # the ground during normal locomotion.
+        self.terminations.base_contact.params = {
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base", ".*hip", ".*thigh"]),
+            "threshold": 1.0,
+        }
 
         self.actions.velocity_command.low_level_position_action = mdp.JointPositionActionCfg(
             asset_name="robot",

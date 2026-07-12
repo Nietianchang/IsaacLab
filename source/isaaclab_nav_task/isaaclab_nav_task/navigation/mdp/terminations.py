@@ -217,8 +217,11 @@ def terrain_fall(
     Returns:
         Boolean tensor indicating whether the robot has fallen.
     """
-    # Direct tensor access for z-coordinate (avoids intermediate variable allocation)
-    termination = env.scene[asset_cfg.name].data.root_pos_w[:, 2] < fall_height_threshold
+    # Use the robot height RELATIVE to its per-env spawn origin (local ground level) instead of
+    # the absolute world z. This makes the check robust to terrain tiles at different absolute
+    # heights: falling `fall_height_threshold` meters below the spawn ground counts as a fall.
+    relative_height = env.scene[asset_cfg.name].data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    termination = relative_height < fall_height_threshold
 
     # Early exit if no terminations (common case - avoids torch.where overhead)
     if not termination.any():
