@@ -302,11 +302,17 @@ class SuccessRateTracker:
         self.buffer_size = buffer_size
         self.buffer = torch.full((num_envs, buffer_size), -1.0, device=device)
         self.write_index = torch.zeros(num_envs, dtype=torch.long, device=device)
+        # Per-env verdict of the most recent episode termination (1=success,
+        # 0=failure, -1=no result yet). Updated by every termination through
+        # record_result, so other consumers (e.g. the stairs curriculum) can reuse
+        # the exact same success/failure decision instead of recomputing it.
+        self.last_result = torch.full((num_envs,), -1.0, device=device)
 
     def record_result(self, success: torch.Tensor, env_ids: torch.Tensor):
         indices = self.write_index[env_ids] % self.buffer_size
         self.buffer[env_ids, indices] = success[env_ids].float()
         self.write_index[env_ids] += 1
+        self.last_result[env_ids] = success[env_ids].float()
 
     def add(self, results: torch.Tensor, env_ids: torch.Tensor):
         """Legacy alias."""
@@ -334,6 +340,13 @@ class RobotNavigationGoalCommand(CommandTerm):
 
     cfg: RobotNavigationGoalCommandCfg
 
+    # Termination reason codes written by mdp/terminations.py.
+    TERM_REASON_TIMEOUT = 0
+    TERM_REASON_AT_GOAL = 1
+    TERM_REASON_CONTACT = 2
+    TERM_REASON_LARGE_ANGLE = 3
+    TERM_REASON_TERRAIN_FALL = 4
+
     def __init__(self, cfg: RobotNavigationGoalCommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
 
@@ -350,6 +363,7 @@ class RobotNavigationGoalCommand(CommandTerm):
         self._init_command_buffers()
         self._init_tracking_buffers()
         self._init_metrics()
+        self._init_stair_curriculum()
 
         # Position sampling (lazy initialization)
         self._sampling_initialized = False
@@ -387,12 +401,58 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.goal_reach_count = torch.zeros(self.num_envs, device=self.device)
         self.success_tracker = SuccessRateTracker(self.num_envs, self.device, buffer_size=10)
         self.success_rate_buffer = torch.full((self.num_envs, 10), -1.0, device=self.device)
+        # Last termination reason per env (-1 = unknown/not yet set).
+        self.last_termination_reason = torch.full((self.num_envs,), -1, dtype=torch.int8, device=self.device)
+
+    def mark_termination_reason(self, env_ids: torch.Tensor, reason: int):
+        """Record the latest episode termination reason for specified envs."""
+        if env_ids.numel() == 0:
+            return
+        self.last_termination_reason[env_ids] = int(reason)
 
     def _init_metrics(self):
         """Initialize performance metrics."""
         self.metrics["velocity_toward_goal"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["velocity_magnitude"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["success_rate"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["stair_curriculum_level"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["stair_curriculum_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["stair_success_rate"] = torch.zeros(self.num_envs, device=self.device)
+
+    def _init_stair_curriculum(self):
+        """Initialize state for the stairs-specific goal curriculum."""
+        # Discrete curriculum level (0 = easiest). The unlocked height for the
+        # current level is start + level * increment (capped by max_height).
+        self.stair_curriculum_level = 0
+        self.stair_curriculum_max_level = max(
+            0,
+            int(round(
+                (float(self.cfg.stair_curriculum_max_height) - float(self.cfg.stair_curriculum_start_height))
+                / max(float(self.cfg.stair_curriculum_increment), 1e-6)
+            )),
+        )
+        self.stair_curriculum_height = self._stair_height_for_level(self.stair_curriculum_level)
+
+        # Per-env flag: True if the env's current goal was placed on a staircase.
+        self.stair_goal_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Global rolling buffer of stair-goal outcomes (-1 = empty, 0 = fail, 1 = success).
+        buf_size = int(self.cfg.stair_curriculum_buffer_size)
+        self.stair_success_buffer = torch.full((buf_size,), -1.0, device=self.device)
+        self.stair_success_write = 0
+
+        # Minimum sampled height (m) for a goal to count as "on the staircase". Goals
+        # sampled on the flat walkway of a stairs tile (z ~ 0) are NOT snapped, so we
+        # do not convert good flat-ground goals into stair goals.
+        self._stair_min_step_height = 0.05
+
+        # Throttle counter so the periodic status print does not spam the console.
+        self._stair_eval_count = 0
+
+        # Populated once terrain data is available (see _precompute_stair_data).
+        self._is_stairs_terrain: Optional[torch.Tensor] = None
+        self._stair_platform_positions: dict[int, torch.Tensor] = {}
+        self._stair_platform_heights: dict[int, torch.Tensor] = {}
 
     # =========================================================================
     # Command Interface
@@ -468,7 +528,248 @@ class RobotNavigationGoalCommand(CommandTerm):
             border_width=sub_terrain_border_width,
         )
 
+        # Pre-compute stairs-tile metadata for the goal curriculum.
+        self._precompute_stair_data()
+
         self._sampling_initialized = True
+
+    def _precompute_stair_data(self):
+        """Pre-compute which terrain tiles are staircases and their step data.
+
+        A tile is considered a staircase iff it has any platform_mask cells
+        (only ``StairGenerator`` produces platform_mask). For each such tile we
+        cache the valid staircase-step (x, y) indices and their heights in meters
+        so goals that land on the staircase can be snapped to a specific step
+        height by the curriculum. Candidate cells are the *raised* step cells
+        (height > 0), not just the top platform, so all step heights are available.
+        """
+        sampler = self._position_sampler
+        platform = sampler.platform_mask  # (num_terrains, W, H) bool
+        heights = sampler.heights          # (num_terrains, W, H) raw height field
+        valid = sampler.valid_mask         # (num_terrains, W, H) bool
+        num_terrains = platform.shape[0]
+
+        # Cache sampler geometry for local-coordinate conversion.
+        self._sampler_cell = sampler.cell_size
+        self._sampler_border = sampler.border_pixels
+        self._sampler_center = sampler.mesh_center
+
+        self._is_stairs_terrain = platform.view(num_terrains, -1).any(dim=1)
+        self._stair_platform_positions = {}
+        self._stair_platform_heights = {}
+
+        for t in torch.nonzero(self._is_stairs_terrain, as_tuple=False).flatten().tolist():
+            t = int(t)
+            # Staircase-step cells = raised, valid cells. In a stairs tile only the
+            # staircase is raised; the walkway stays at height 0. Using every raised
+            # step (not just the top platform) gives the curriculum a full range of
+            # heights to snap to.
+            mask_t = valid[t] & (heights[t] > 0)
+            pos = mask_t.nonzero(as_tuple=False)  # (N, 2)
+            if pos.shape[0] == 0:
+                # Fallback to the top platform if step cells were dilated away.
+                pos = (platform[t] & valid[t]).nonzero(as_tuple=False)
+            if pos.shape[0] == 0:
+                pos = platform[t].nonzero(as_tuple=False)
+            if pos.shape[0] == 0:
+                self._is_stairs_terrain[t] = False
+                continue
+            h = heights[t, pos[:, 0], pos[:, 1]].float() * VERTICAL_SCALE
+            self._stair_platform_positions[t] = pos
+            self._stair_platform_heights[t] = h
+
+    def _compute_stair_goals(
+        self, terrain_indices: torch.Tensor, orig_goal_z: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute snapped goal positions for goals that landed on a staircase.
+
+        Only goals whose originally-sampled height is above the walkway (i.e. that
+        already landed on a raised staircase step) are snapped; goals sampled on
+        the flat walkway of a stairs tile are left untouched so flat-ground goals
+        are not converted into stair goals. For the snapped goals, the target step
+        is the one whose height is closest to the current curriculum height (capped
+        by the tallest step of that particular staircase).
+
+        Args:
+            terrain_indices: Terrain index per env being resampled, shape (n,).
+            orig_goal_z: Originally-sampled goal height (meters) per env, shape (n,).
+
+        Returns:
+            Tuple ``(stair_mask, x, y, z)`` each shape (n,). ``stair_mask`` marks
+            which entries were snapped; x/y/z are local coordinates (meters) that
+            are only meaningful where ``stair_mask`` is True.
+        """
+        n = terrain_indices.shape[0]
+        stair_mask = self._is_stairs_terrain[terrain_indices].clone()
+        # Only snap goals that already landed on a raised staircase step; leave
+        # flat-walkway goals (z ~ 0) as-is so we don't create extra stair goals.
+        stair_mask &= orig_goal_z > self._stair_min_step_height
+        sx = torch.zeros(n, device=self.device)
+        sy = torch.zeros(n, device=self.device)
+        sz = torch.zeros(n, device=self.device)
+
+        for i in torch.nonzero(stair_mask, as_tuple=False).flatten().tolist():
+            tidx = int(terrain_indices[i].item())
+            pos = self._stair_platform_positions.get(tidx)
+            if pos is None or pos.shape[0] == 0:
+                stair_mask[i] = False
+                continue
+
+            target = self._stair_height_for_level(self._sample_stair_level())
+            lx, ly, lz = self._pick_stair_cell(tidx, target)
+            sx[i] = lx
+            sy[i] = ly
+            sz[i] = lz
+
+        return stair_mask, sx, sy, sz
+
+    def _sample_stair_level(self) -> int:
+        """Sample a curriculum level: 50% the current top level, 50% a review level.
+
+        The review level is drawn uniformly from [0, current_level] so lower steps
+        keep appearing after the curriculum advances.
+        """
+        if float(torch.rand(1, device=self.device).item()) < 0.5:
+            return self.stair_curriculum_level
+        return int(torch.randint(0, self.stair_curriculum_level + 1, (1,), device=self.device).item())
+
+    def _pick_stair_cell(self, tidx: int, target: float, ref_xy=None):
+        """Pick a staircase cell whose height is closest to ``target``.
+
+        Among the steps nearest to the target curriculum height, either a random
+        one is chosen (``ref_xy`` is None) or the one closest to ``ref_xy`` (used
+        when converting a flat goal onto the nearest step).
+
+        Returns:
+            Local ``(x, y, z)`` coordinates in meters.
+        """
+        pos = self._stair_platform_positions[tidx]
+        h = self._stair_platform_heights[tidx]
+
+        # Cap the target by the tallest step available on this staircase, then keep
+        # the steps whose height is closest to it.
+        t = min(target, float(h.max().item()))
+        diff = (h - t).abs()
+        min_diff = diff.min()
+        candidates = torch.nonzero(diff <= min_diff + 1e-3, as_tuple=False).flatten()
+
+        cand_x = (pos[candidates, 0].float() + self._sampler_border) * self._sampler_cell - self._sampler_center
+        cand_y = (pos[candidates, 1].float() + self._sampler_border) * self._sampler_cell - self._sampler_center
+        if ref_xy is None:
+            j = int(torch.randint(len(candidates), (1,), device=self.device).item())
+        else:
+            d2 = (cand_x - ref_xy[0]) ** 2 + (cand_y - ref_xy[1]) ** 2
+            j = int(d2.argmin().item())
+        return float(cand_x[j].item()), float(cand_y[j].item()), float(h[candidates[j]].item())
+
+    def _augment_stair_goals(self, env_ids_tensor, terrain_indices, stair_mask, goal_x, goal_y, goal_z):
+        """Top up the number of stair goals to ``stair_curriculum_min_goals``.
+
+        Flat-walkway goals inside stairs tiles are converted onto the nearest step
+        at the corresponding curriculum height until the global stair-goal count
+        reaches the configured minimum (or no more flat candidates remain).
+
+        Returns the (possibly modified) ``goal_x, goal_y, goal_z, stair_mask``.
+        """
+        min_goals = int(self.cfg.stair_curriculum_min_goals)
+        if min_goals <= 0:
+            return goal_x, goal_y, goal_z, stair_mask
+
+        # Global stair-goal count once this batch's current mask is applied.
+        tentative = self.stair_goal_mask.clone()
+        tentative[env_ids_tensor] = stair_mask
+        deficit = min_goals - int(tentative.sum().item())
+        if deficit <= 0:
+            return goal_x, goal_y, goal_z, stair_mask
+
+        # Convertible goals: inside a stairs tile but currently on the flat walkway.
+        is_stairs = self._is_stairs_terrain[terrain_indices]
+        flat_candidates = torch.nonzero(is_stairs & ~stair_mask, as_tuple=False).flatten()
+        if flat_candidates.numel() == 0:
+            return goal_x, goal_y, goal_z, stair_mask
+
+        # Randomly pick up to ``deficit`` of them and snap each onto the nearest step.
+        perm = flat_candidates[torch.randperm(flat_candidates.numel(), device=self.device)]
+        for i in perm[:deficit].tolist():
+            tidx = int(terrain_indices[i].item())
+            pos = self._stair_platform_positions.get(tidx)
+            if pos is None or pos.shape[0] == 0:
+                continue
+            target = self._stair_height_for_level(self._sample_stair_level())
+            lx, ly, lz = self._pick_stair_cell(
+                tidx, target, ref_xy=(float(goal_x[i].item()), float(goal_y[i].item()))
+            )
+            goal_x[i] = lx
+            goal_y[i] = ly
+            goal_z[i] = lz
+            stair_mask[i] = True
+
+        return goal_x, goal_y, goal_z, stair_mask
+
+    def _record_stair_results(self, results: torch.Tensor):
+        """Append stair-goal outcomes (0/1 float tensor) to the rolling buffer."""
+        n = results.shape[0]
+        if n == 0:
+            return
+        buf_size = self.stair_success_buffer.shape[0]
+        idx = (torch.arange(n, device=self.device) + self.stair_success_write) % buf_size
+        self.stair_success_buffer[idx] = results.float()
+        self.stair_success_write = int((self.stair_success_write + n) % buf_size)
+
+    def _stair_success_rate(self) -> float:
+        """Return the current success rate over recorded stair goals."""
+        filled = self.stair_success_buffer >= 0
+        if not bool(filled.any()):
+            return 0.0
+        return float((self.stair_success_buffer[filled] > 0).float().mean().item())
+
+    def _stair_height_for_level(self, level: int) -> float:
+        """Convert a curriculum level to a target step height (meters)."""
+        height = float(self.cfg.stair_curriculum_start_height) + level * float(self.cfg.stair_curriculum_increment)
+        return min(height, float(self.cfg.stair_curriculum_max_height))
+
+    def _maybe_advance_stair_curriculum(self):
+        """Raise the target step level once stair goals are solved reliably.
+
+        Also periodically prints the current curriculum level and success rate.
+        """
+        filled = self.stair_success_buffer >= 0
+        num_filled = int(filled.sum().item())
+        if num_filled < int(self.cfg.stair_curriculum_min_samples):
+            return
+
+        rate = float((self.stair_success_buffer[filled] > 0).float().mean().item())
+        threshold = float(self.cfg.stair_curriculum_success_threshold)
+        at_max = self.stair_curriculum_level >= self.stair_curriculum_max_level
+
+        if rate > threshold and not at_max:
+            old_level = self.stair_curriculum_level
+            old_height = self.stair_curriculum_height
+            self.stair_curriculum_level += 1
+            self.stair_curriculum_height = self._stair_height_for_level(self.stair_curriculum_level)
+            # Reset the buffer so the next level is evaluated from scratch.
+            self.stair_success_buffer[:] = -1.0
+            self.stair_success_write = 0
+            self._stair_eval_count = 0
+            print(
+                f"[楼梯课程] 升级: 等级 {old_level} -> {self.stair_curriculum_level} "
+                f"(上限 {self.stair_curriculum_max_level}), "
+                f"目标最高台阶高度 {old_height:.2f}m -> {self.stair_curriculum_height:.2f}m, "
+                f"成功率 {rate * 100:.1f}% ({num_filled} 样本)",
+                flush=True,
+            )
+            return
+
+        # Periodic status print (throttled) when not advancing.
+        self._stair_eval_count += 1
+        if self._stair_eval_count % 50 == 0:
+            status = "已达最高等级" if at_max else "未达升级阈值"
+            print(
+                f"[楼梯课程] 当前等级 {self.stair_curriculum_level}/{self.stair_curriculum_max_level}, "
+                f"目标最高台阶高度 {self.stair_curriculum_height:.2f}m, "
+                f"成功率 {rate * 100:.1f}% ({num_filled} 样本, 阈值 {threshold * 100:.0f}%, {status})",
+                flush=True,
+            )
 
     def _get_terrain_indices(self, env_ids: torch.Tensor) -> torch.Tensor:
         """Get terrain indices for given environment IDs.
@@ -519,6 +820,22 @@ class RobotNavigationGoalCommand(CommandTerm):
         goal_x, goal_y, goal_z = self._position_sampler.sample(terrain_indices)
         # Sample spawn positions (from spawn_mask with larger padding for robot body)
         spawn_x, spawn_y, spawn_z = self._position_sampler.sample_spawn(terrain_indices)
+
+        # Stairs curriculum: snap goals that land on a staircase to a specific
+        # step height that grows with the curriculum.
+        if self.cfg.stair_curriculum_enabled:
+            stair_mask, stair_x, stair_y, stair_z = self._compute_stair_goals(terrain_indices, goal_z)
+            goal_x = torch.where(stair_mask, stair_x, goal_x)
+            goal_y = torch.where(stair_mask, stair_y, goal_y)
+            goal_z = torch.where(stair_mask, stair_z, goal_z)
+            # Ensure at least ``stair_curriculum_min_goals`` stair goals globally by
+            # converting nearby flat-walkway goals in stairs tiles into stair goals.
+            goal_x, goal_y, goal_z, stair_mask = self._augment_stair_goals(
+                env_ids_tensor, terrain_indices, stair_mask, goal_x, goal_y, goal_z
+            )
+            self.stair_goal_mask[env_ids_tensor] = stair_mask
+        else:
+            self.stair_goal_mask[env_ids_tensor] = False
 
         # Convert to world coordinates
         terrain = self.env.scene.terrain
@@ -618,32 +935,159 @@ class RobotNavigationGoalCommand(CommandTerm):
         direction_to_goal = position_error_2d / torch.clamp(torch.norm(position_error_2d, dim=1, keepdim=True), min=1e-6)
         self.metrics["velocity_toward_goal"] = (velocity_2d * direction_to_goal).sum(dim=1)
         self.metrics["success_rate"] = self.success_tracker.get_success_rate()
+        self.metrics["stair_curriculum_level"][:] = float(self.stair_curriculum_level)
+        self.metrics["stair_curriculum_height"][:] = self.stair_curriculum_height
+        self.metrics["stair_success_rate"][:] = self._stair_success_rate()
+
+        # 实时跟踪一个楼梯目标环境：若当前观测 env 不再是楼梯目标，
+        # 立即切换到新的楼梯目标并继续每步打印。
+        if self.cfg.stair_curriculum_enabled:
+            if not hasattr(self, "_watch_stair_env"):
+                self._watch_stair_env = -1
+
+            def _is_valid_stair_watch(eid: int) -> bool:
+                if eid < 0:
+                    return False
+                if not bool(self.stair_goal_mask[eid].item()):
+                    return False
+                t_idx = int(self._get_terrain_indices(torch.tensor([eid], device=self.device, dtype=torch.long))[0].item())
+                return bool(self._is_stairs_terrain[t_idx].item())
+
+            # 若未锁定，或当前观测 env 已不在楼梯目标上，则重新选择。
+            need_switch = not _is_valid_stair_watch(self._watch_stair_env)
+            if need_switch:
+                stair_ids = self.stair_goal_mask.nonzero(as_tuple=False).flatten()
+                self._watch_stair_env = -1
+                for sid in stair_ids.tolist():
+                    sid = int(sid)
+                    if _is_valid_stair_watch(sid):
+                        self._watch_stair_env = sid
+                        break
+
+            if _is_valid_stair_watch(self._watch_stair_env):
+                eid = self._watch_stair_env
+                t_idx = int(self._get_terrain_indices(torch.tensor([eid], device=self.device, dtype=torch.long))[0].item())
+                dist = float(self.distance_to_goal[eid].item())
+                reached = bool((self.time_at_goal[eid] > 0.0).item())
+                verdict = float(self.success_tracker.last_result[eid].item())
+                verdict_str = "成功" if verdict > 0.0 else ("失败" if verdict == 0.0 else "未结算")
+                print(
+                    f"[楼梯实时] env{eid}(楼梯,tile={t_idx}) 距目标{dist:.2f}m "
+                    f"{'已到达' if reached else '未到达'} 判定:{verdict_str}",
+                    flush=True,
+                )
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         """Reset command generator and compute episode metrics."""
+        if env_ids is None:
+            env_ids_tensor = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+
         metrics_obs = self.env.observation_manager.compute_group(group_name="metrics")
-        success = metrics_obs["in_goal"][env_ids].squeeze(-1)
+        success = metrics_obs["in_goal"][env_ids_tensor].squeeze(-1)
         failed = ~success
 
         # Update legacy success rate buffer
-        self.success_rate_buffer[env_ids] = torch.roll(
-            self.success_rate_buffer[env_ids], 1, dims=1
+        self.success_rate_buffer[env_ids_tensor] = torch.roll(
+            self.success_rate_buffer[env_ids_tensor], 1, dims=1
         )
         rate = success.float() - failed.float()
         rate[rate == 0] = -1
-        self.success_rate_buffer[env_ids, 0] = rate
+        self.success_rate_buffer[env_ids_tensor, 0] = rate
+
+        # Diagnostic stats requested by user:
+        # flat goal (non-stair) with final distance in (0.5m, 1.5m).
+        stair_sel_all = self.stair_goal_mask[env_ids_tensor]
+        flat_sel = ~stair_sel_all
+        dist_end_all = self.distance_to_goal[env_ids_tensor]
+        near_band_sel = (dist_end_all > 0.5) & (dist_end_all < 1.5)
+        flat_near_band_sel = flat_sel & near_band_sel
+
+        timeout_sel = self.last_termination_reason[env_ids_tensor] == self.TERM_REASON_TIMEOUT
+        flat_near_band_timeout_sel = flat_near_band_sel & timeout_sel
+
+        batch_size = int(env_ids_tensor.numel())
+        flat_near_band_count = int(flat_near_band_sel.sum().item())
+        flat_near_band_timeout_count = int(flat_near_band_timeout_sel.sum().item())
+        timeout_count = int(timeout_sel.sum().item())
+
+        flat_near_band_ratio = (flat_near_band_count / batch_size) if batch_size > 0 else 0.0
+        timeout_flat_near_band_ratio = (
+            flat_near_band_timeout_count / timeout_count if timeout_count > 0 else 0.0
+        )
+
+        print(
+            f"[平地近终点统计] batch={batch_size} 平地且0.5<dist<1.5:{flat_near_band_count}"
+            f" ({flat_near_band_ratio * 100:.1f}%) timeout内:{flat_near_band_timeout_count}"
+            f"/{timeout_count} ({timeout_flat_near_band_ratio * 100:.1f}%)",
+            flush=True,
+        )
+
+        # Stairs curriculum: record outcomes for envs whose goal was on a
+        # staircase, then advance the target height if solved reliably. Must run
+        # before _resample overwrites stair_goal_mask / clears time_at_goal.
+        if self.cfg.stair_curriculum_enabled:
+            stair_sel = self.stair_goal_mask[env_ids_tensor]
+            if bool(stair_sel.any()):
+                # Reuse the EXACT verdict the termination functions already computed
+                # for this episode (stored per-env in success_tracker.last_result).
+                # That verdict counts reaching the goal as success but a fall /
+                # illegal contact / large tilt as failure, matching the official
+                # navigation success. It is stricter than "time_at_goal > 0", which
+                # would still count a robot that reached the step and then crashed
+                # as a success. -1 means no termination result yet (skip it).
+                outcome = self.success_tracker.last_result[env_ids_tensor]
+                valid = stair_sel & (outcome >= 0.0)
+                if bool(valid.any()):
+                    self._record_stair_results(outcome[valid])
+
+                # 调试打印：目标点刷在楼梯上的环境，打印其 env id、距离终点状态
+                # (整回合最近距离 + 回合结束时距离) 以及是否成功 (是否到达过 + 最终判定)。
+                eids = env_ids_tensor
+                stair_eids = eids[stair_sel]
+                dist_min = self.closest_distance_to_goal[stair_eids]
+                dist_end = self.distance_to_goal[stair_eids]
+                reached = self.time_at_goal[stair_eids] > 0.0
+                verdict = self.success_tracker.last_result[stair_eids]
+                max_print = min(stair_eids.numel(), 10)
+                parts = []
+                for k in range(max_print):
+                    v = float(verdict[k].item())
+                    v_str = "成功" if v > 0 else ("失败" if v == 0 else "无结果")
+                    parts.append(
+                        f"env{int(stair_eids[k].item())}(最近{float(dist_min[k].item()):.2f}m,"
+                        f"结束{float(dist_end[k].item()):.2f}m,"
+                        f"到达{'是' if bool(reached[k].item()) else '否'},{v_str})"
+                    )
+                more = "" if stair_eids.numel() <= max_print else f" ...共{stair_eids.numel()}个"
+                print("[楼梯调试] " + " ".join(parts) + more, flush=True)
+            self._maybe_advance_stair_curriculum()
+            # Clear the consumed verdicts so a later reset without a fresh
+            # termination cannot double-count a stale result.
+            self.success_tracker.last_result[env_ids_tensor] = -1.0
 
         # Reset command state
-        if env_ids is None:
-            env_ids = slice(None)
-        self.command_counter[env_ids] = 0
-        self._resample(env_ids)
+        self.command_counter[env_ids_tensor] = 0
+        self._resample(env_ids_tensor)
 
         # Return mean metrics
         extras = {}
         for name, value in self.metrics.items():
-            extras[name] = torch.mean(value[env_ids]).item()
-            value[env_ids] = 0.0
+            extras[name] = torch.mean(value[env_ids_tensor]).item()
+            value[env_ids_tensor] = 0.0
+
+        # Send flat near-goal diagnostics to TensorBoard.
+        extras["flat_goal_0p5_1p5_count"] = float(flat_near_band_count)
+        extras["flat_goal_0p5_1p5_ratio"] = float(flat_near_band_ratio)
+        extras["flat_goal_0p5_1p5_timeout_count"] = float(flat_near_band_timeout_count)
+        extras["flat_goal_0p5_1p5_timeout_ratio_in_timeouts"] = float(timeout_flat_near_band_ratio)
+        extras["timeout_count"] = float(timeout_count)
+
+        # Clear consumed reason codes for reset envs.
+        self.last_termination_reason[env_ids_tensor] = -1
 
         return extras
 

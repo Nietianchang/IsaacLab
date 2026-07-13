@@ -68,6 +68,7 @@ def time_out_navigation(
         value_buffer = torch.zeros_like(distance_goal)  # init with 0: Fail
         value_buffer[success_masks] = 1.0  # Success
         goal_cmd_generator.goal_reached_buffer.add(value_buffer, env_ids)
+        goal_cmd_generator.mark_termination_reason(env_ids, goal_cmd_generator.TERM_REASON_TIMEOUT)
 
     return termination
 
@@ -116,6 +117,7 @@ def illegal_contact_navigation(
 
     if env_ids.numel() > 0:  # Check if env_ids is not empty
         goal_cmd_generator.goal_reached_buffer.add(torch.zeros_like(termination, dtype=torch.float), env_ids)
+        goal_cmd_generator.mark_termination_reason(env_ids, goal_cmd_generator.TERM_REASON_CONTACT)
 
     return termination
 
@@ -144,6 +146,7 @@ def large_angle_termination_navigation(
 
     if env_ids.numel() > 0:  # Check if env_ids is not empty
         goal_cmd_generator.goal_reached_buffer.add(torch.zeros_like(termination, dtype=torch.float), env_ids)
+        goal_cmd_generator.mark_termination_reason(env_ids, goal_cmd_generator.TERM_REASON_LARGE_ANGLE)
 
     return termination
 
@@ -191,6 +194,7 @@ def at_goal_navigation(
     env_ids = torch.where(termination)[0]
     if env_ids.numel() > 0:  # Check if any environments have met the termination condition
         goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
+        goal_cmd_generator.mark_termination_reason(env_ids, goal_cmd_generator.TERM_REASON_AT_GOAL)
 
     return termination
 
@@ -232,5 +236,6 @@ def terrain_fall(
     if goal_cmd is not None:
         env_ids = termination.nonzero(as_tuple=False).squeeze(-1)
         goal_cmd.goal_reached_buffer.add(torch.zeros(env.num_envs, dtype=torch.float, device=env.device), env_ids)
+        goal_cmd.mark_termination_reason(env_ids, goal_cmd.TERM_REASON_TERRAIN_FALL)
 
     return termination
