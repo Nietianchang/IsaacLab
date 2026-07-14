@@ -53,7 +53,7 @@ class RobotNavigationGoalCommandCfg(CommandTermCfg):
     """Maximum target step height (meters). Per-tile the target is additionally
     capped by the tallest available step on that staircase."""
 
-    stair_curriculum_success_threshold: float = 0.8
+    stair_curriculum_success_threshold: float = 0.45
     """Success rate on stair goals required before raising the target height."""
 
     stair_curriculum_buffer_size: int = 100

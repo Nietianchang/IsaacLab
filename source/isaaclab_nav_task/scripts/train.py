@@ -44,6 +44,25 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--run_name", type=str, default=None, help="Name of the wandb run (appended to log directory).")
+parser.add_argument("--resume", action="store_true", default=False, help="Resume training from a checkpoint.")
+parser.add_argument(
+    "--load_run",
+    type=str,
+    default=".*",
+    help="Run directory pattern to load from when resuming (default: all runs).",
+)
+parser.add_argument(
+    "--load_checkpoint",
+    type=str,
+    default="model_.*.pt",
+    help="Checkpoint file pattern to load when resuming.",
+)
+parser.add_argument(
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="Optional explicit checkpoint path. If set, it overrides --load_run/--load_checkpoint.",
+)
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -107,6 +126,12 @@ def main():
         agent_cfg.max_iterations = args_cli.max_iterations
     if args_cli.run_name is not None:
         agent_cfg.run_name = args_cli.run_name
+    if args_cli.resume:
+        agent_cfg.resume = True
+    if args_cli.load_run is not None:
+        agent_cfg.load_run = args_cli.load_run
+    if args_cli.load_checkpoint is not None:
+        agent_cfg.load_checkpoint = args_cli.load_checkpoint
 
     # Create the environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -117,14 +142,31 @@ def main():
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # Specify run directory based on timestamp
+
+    resume_path = None
+    if args_cli.checkpoint is not None:
+        resume_path = os.path.abspath(args_cli.checkpoint)
+    elif agent_cfg.resume:
+        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
+    # Always create a fresh log directory for the new training run.
+    # When resume/checkpoint is set, we load weights from the old run but write
+    # new TensorBoard/W&B logs into a separate timestamped directory.
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
+    if resume_path is not None:
+        log_dir += "_resume"
+        print(f"[INFO] Resuming training from checkpoint: {resume_path}")
     log_dir = os.path.join(log_root_path, log_dir)
+    print(f"[INFO] Writing logs to directory: {log_dir}")
 
     # Create runner
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+
+    if resume_path is not None:
+        runner.load(resume_path)
+
     # Write git state to log
     runner.add_git_repo_to_log(__file__)
     # Save configuration
