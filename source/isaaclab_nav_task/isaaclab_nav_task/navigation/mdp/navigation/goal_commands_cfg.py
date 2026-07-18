@@ -63,7 +63,7 @@ class RobotNavigationGoalCommandCfg(CommandTermCfg):
     """Minimum number of recorded stair-goal outcomes before the success rate is
     trusted enough to advance the curriculum."""
 
-    stair_curriculum_min_goals: int = 400
+    stair_curriculum_min_goals: int = 600
     """Ensure at least this many stair goals exist globally. If fewer goals land on
     staircases, nearby flat-walkway goals inside stairs tiles are converted onto the
     nearest step at the corresponding curriculum height until this count is reached."""
